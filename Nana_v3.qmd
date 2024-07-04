@@ -1,0 +1,679 @@
+---
+title: "Nana v3"
+author: "SB"
+date: last-modified
+format: 
+  html: 
+    toc: true
+    number-sections: true
+    toc-depth: 4
+    embed-resources: true    
+execute:
+  echo: false
+  warning: false
+  error: false
+---
+
+```{r setup}
+library(tidyverse)
+library(vosonSML) #extraction des données youtube
+library(readr)
+library(lubridate)
+library(kableExtra)
+library(ggwordcloud)
+library(tidyEmoji)
+library(jtools)
+library(texreg)
+library(lm.beta)
+library(flextable)
+library(rstatix)
+library(slider)#moyennes mobiles
+library(interactions) # pour les graphiques d'interaction
+library(factoextra)
+library(psych)
+library(modelsummary)
+library(wesanderson)
+library(ggplot2)
+library(ggpubr)
+
+options("modelsummary_factory_default" = "gt")
+knitr::opts_knit$set(global.asp=TRUE)
+
+okabe <- c("#E69F00", "#56B4E9", "#CC79A7", "#009E73")
+
+data<-read_csv2("data_yt_nana.csv")
+zs<-read_csv("nana_zs2.csv")%>%select(2, where(is.numeric),-1)
+
+
+
+data<-data%>%mutate(conv=as_factor(if_else(ReplyCount!=0, "initiateur", if_else(!is.na(ParentID), "reaction", "conversation"))))
+# summary(data$LikeCount)
+
+
+
+data<-data%>%mutate(ParentID=coalesce(ParentID, CommentID))%>%
+  group_by(ParentID)%>%arrange(PublishedAt, .by_group = TRUE)%>%
+  mutate(rang=row_number()-1,
+         VideoID=fct_recode(VideoID, "1" = "LyMHNvEkvwU", "2" = "0XsfTfFydOU", "3" = "kmEBJR9Nk_Q", "4" = "uo6uh5YAnrA"))%>%
+  ungroup()%>%
+  inner_join(zs)%>%
+  rename(avant_gardisme=`avant-gardisme`, hors_normes=`hors normes`, anti_conformiste=`anti-conformiste`)
+
+
+
+
+```
+
+
+## Classification Zéro-Shot
+
+On a utilisé un algorithme de classification zéro-shot, sans apprentissage préalable. Le modèle de langage retenu est un modèle Camembert entraîné sur des données Facebook (cf [model card sur Hugging Face](https://huggingface.co/mtheo/camembert-base-xnli)). On a testé 47 labels.
+
+On commence par présenter les labels retenus et quelques exemples de commentaires qui ont obtenu des scores très importants sur certains labels, pour montrer que l'algo fonctionne très bien.
+
+Pour voir directement les résultats des tests d'hypothèse, rendez-vous à @sec-hyp.
+
+```{r}
+# labels<-reticulate::py$labels
+# write.csv(labels, "labelZS2.csv")
+labels<-read.csv("labelZS2.csv")
+lab<-labels%>%mutate(categorie=rep(c("émotions et sentiments", "transgression", "adhésion"), c(16,17,14)))%>%select(-X)%>%pivot_wider(names_from = categorie, values_from = x, values_fn = list)%>% pivot_longer(everything()) %>%   mutate(value = map(value, `length<-`, max(lengths(value)))) %>% 
+  pivot_wider(names_from = name, values_from = value) %>% 
+  unnest(everything())%>%replace_na(list("émotions et sentiments"=" ", adhésion=" "))
+
+datasummary_df(lab, title="Les labels recherchés")
+
+deg<-data%>%ungroup()%>%filter(dégoût>0.9)%>%select(Comment, dégoût)%>%arrange(desc(dégoût))%>%head(5)
+tabou<-data%>%ungroup()%>%filter(tabou>0.9)%>%select(Comment, tabou)%>%arrange(desc(tabou))%>%head(5)
+fem<-data%>%ungroup()%>%filter(féminisme>0.9)%>%select(Comment, féminisme)%>%arrange(desc(féminisme))%>%head(5)
+choquant<-data%>%ungroup()%>%filter(choquant>0.9)%>%select(Comment, choquant)%>%arrange(desc(choquant))%>%head(5)
+transgression<-data%>%ungroup()%>%filter(transgression>0.9)%>%select(Comment, transgression)%>%arrange(desc(transgression))%>%head(5)
+positif<-data%>%ungroup()%>%filter(positif>0.9)%>%select(Comment, positif)%>%arrange(desc(positif))%>%head(5)
+
+datasummary_df(deg, title = "Les commentaires les plus associés à dégoût", notes="Chiffres arrondis")
+datasummary_df(tabou, title = "Les commentaires les plus associés à tabou", notes="Chiffres arrondis")
+datasummary_df(fem, title = "Les commentaires les plus associés à féminisme", notes="Chiffres arrondis")
+datasummary_df(choquant, title = "Les commentaires les plus associés à choquant", notes="Chiffres arrondis")
+datasummary_df(transgression, title = "Les commentaires les plus associés à transgression", notes="Chiffres arrondis")
+datasummary_df(positif, title = "Les commentaires les plus associés à positif", notes="Chiffres arrondis")
+# kable(cbind(deg,tabou, inclusion, choquant))
+datasummary_skim(zs, output = "tinytable",title="Statistiques descriptives des résultats de la classification Zéro-Shot",
+                 fun_numeric = list(Mean = Mean, SD =
+    SD, Min = Min, Median = Median, Max = Max, Histogram = function(x) ""))
+
+```
+
+
+## Analyses factorielles
+
+### Corrélations
+
+Ici, on regarde les corrélations entre les labels, pour voir si certains sont redondants :
+
+```{r}
+
+cor.mat<-data%>%select(16:62)%>%cor_mat()%>%
+  cor_reorder() %>%
+  pull_lower_triangle()
+cor.mat%>%cor_plot(method = "color",label=TRUE, insignificant = "blank",font.label = list(size = 0.5, color = "black"))
+
+# 
+# library(correlation)
+# 
+# fun <- function(x) {
+#   out <- correlation(data%>%select(16:62)) |>
+#     summary() |>
+#     format(2) |> 
+#     as.matrix()
+#   row.names(out) <- out[, 1]
+#   out <- out[, 2:ncol(out)]
+#   return(out)
+# }
+# 
+# datasummary_correlation(data, method = fun)
+
+```
+
+### Analyse factorielle exploratoire
+
+On réalise ici une analyse factorielle exploratoire pour réduire le nombre de variables. Tout d'abord, on s'intéresse aux sentiments et émotions (@sec-sent), puis aux composantes de la transgression (@sec-tran), et enfin aux composantes de l'adhésion (@sec-adh).
+
+```{r}
+# # Rotation Oblimin, 5 facteurs sur l'ensemble. Les résultats sont très intéressants, malgré la variété des variables.
+# 
+# 
+# Valeurs <- lavaan::efa(data%>%select(16:62), nfactors = 5, rotation = "oblimin")
+# # print(Valeurs, digits = 3)
+# summary(Valeurs, cutoff = 0.3)
+# lavaan::fitMeasures(Valeurs, fit.measures = c("chisq", "df", "pvalue", "cfi", "tli", "nfi", "aic", "bic", "rmsea", "gfi", "agfi"))
+# 
+# 
+# fa <- fa(data%>%select(16:62),10, rotate="oblimin")
+# summary(fa)
+# print(fa)
+# fa$e.values
+# fa$loadings
+# fa$scores
+
+```
+
+#### Analyse factorielle : émotions et sentiments {#sec-sent}
+
+Trois facteurs, rotation oblimin.
+
+
+```{r}
+
+sent<-data%>%select("positif", "négatif", "neutre", 
+"joie", "tristesse", "colère", "dégoût", "surprise", "confiance", "peur", "honte","gêne","choquant","irritant", "inquiétant", "déroutant")
+
+fa_sent <- fa(sent, 3, rotate="oblimin")
+print(fa_sent)
+# fa_sent$e.values
+# fa_sent$loadings
+data<-data%>%cbind(fa_sent$scores)%>%rename(FA_degout=MR1, FA_surprise=MR3, FA_positif=MR2)
+fa.diagram(fa_sent)
+
+
+```
+
+On renomme les facteurs : FA_degout = MR1, FA_surprise = MR3, FA_positif = MR2
+
+#### Analyse factorielle : transgression {#sec-tran}
+
+Trois facteurs, rotation varimax
+
+```{r}
+transgress<-data%>%select("tabou",   "provocation",  "transgression", "incongruité", "intrusion", "incohérence","intrigant", "décalé", "bizarre", "injustifié", "inhabituel", "hors_normes","étonnant","surprenant", "inattendu", "polémique", "anti_conformiste")
+
+fa_transgress <- fa(transgress, 3, rotate="varimax")
+print(fa_transgress)
+# fa_transgress$e.values
+# fa_transgress$loadings
+data<-data%>%cbind(fa_transgress$scores)%>%rename(FA_inattendu=MR1, FA_incongru=MR3, FA_provocation=MR2)
+fa.diagram(fa_transgress)
+
+```
+
+On renomme les facteurs : FA_inattendu = MR1, FA_incongru = MR3, FA_provocation = MR2
+
+
+#### Analyse factorielle : adhésion {#sec-adh}
+
+3 facteurs, rotation varimax (robuste avec oblimin).
+
+```{r}
+adhesion<-data%>%select("adhésion","inclusion","exclusion", "rejet", "acceptation", "responsable", "sociétal", "activisme","militantisme","avant_gardisme", "identification", "attachement", "féminisme", "défense")
+
+fa_adhesion <- fa(adhesion, 3, rotate="varimax")
+# fa_adhesion$e.values
+print(fa_adhesion)
+# fa_adhesion$loadings
+data<-data%>%cbind(fa_adhesion$scores)%>%rename(FA_inclusion=MR1, FA_militantisme=MR2, FA_exclusion=MR3)
+fa.diagram(fa_adhesion)
+
+
+```
+
+
+On renomme les facteurs : FA_inclusion = MR1, FA_militantisme = MR2, FA_exclusion = MR3
+
+
+
+### Modèles de régression
+
+#### Création du data_lag
+
+
+Pour créer le jeu de données avec les valeurs prises à t-1, on travaille en plusieurs étapes : pour les réactions, on assigne la valeur du commentaire précédent ; pour les initiations et les conversations, on assigne la moyenne des valeurs de t-1 à t-5 (puisque l'algorithme Youtube ne présente pas nécessairement les commentaires par ordre chronologique).
+
+
+```{r}
+reaction<-data%>%filter(conv!="conversation")%>%
+  group_by(ParentID)%>%arrange(PublishedAt, .by_group = TRUE)%>%
+  mutate(across(where(is.numeric)&!...1&!ReplyCount&!LikeCount&!rang, lag, .names = "{.col}_lag"))%>%
+  filter(rang!=0)%>%
+  ungroup()
+
+df<-data%>%filter(conv!="reaction")%>%group_by(VideoID)%>%arrange(PublishedAt, .by_group = TRUE)%>%
+  mutate(rang=row_number(),
+         across(where(is.numeric)&!...1&!ReplyCount&!LikeCount&!rang, ~unlist(slide(.,mean,.before = 5, .after=-1)), .names = "{.col}_lag"))
+
+
+data_lag<-rbind(df, reaction)%>%ungroup()
+```
+
+
+#### Des graphiques sur les données complètes
+
+On représente ici la valeur prise par la variable en fonction de la variable à t-1. On représente tous les scores factoriels.
+
+```{r}
+data_lag<-data_lag%>%
+  group_by(VideoID, ParentID)%>%
+  arrange(PublishedAt, .by_group = TRUE)
+
+ggplot(data_lag, aes(FA_degout, FA_degout_lag))+
+  geom_smooth()
+
+
+ggplot(data_lag, aes(FA_surprise, FA_surprise_lag))+
+  geom_smooth()
+
+
+ggplot(data_lag, aes(FA_positif, FA_positif_lag))+
+  geom_smooth()
+
+ggplot(data_lag, aes(FA_incongru, FA_incongru_lag))+
+  geom_smooth()
+
+ggplot(data_lag, aes(FA_provocation, FA_provocation_lag))+
+  geom_smooth()
+
+ggplot(data_lag, aes(FA_inattendu, FA_inattendu_lag))+
+  geom_smooth()
+
+ggplot(data_lag, aes(FA_inclusion, FA_inclusion_lag))+
+  geom_smooth()
+
+ggplot(data_lag, aes(FA_militantisme, FA_militantisme_lag))+
+  geom_smooth()
+
+ggplot(data_lag, aes(FA_exclusion, FA_exclusion_lag))+
+  geom_smooth()
+
+```
+
+### Création des formules
+
+On automatise la création des formules pour les modèles de régression. On présente les statistiques descriptives des scores factoriels.
+
+```{r}
+
+form<-data_lag%>%select(starts_with("FA")&ends_with("lag"))%>%names()%>%paste(collapse = "+")
+
+variable<-data_lag%>%select(starts_with("FA")&!ends_with("lag"))%>%names()%>%as_data_frame()
+
+variable<-variable%>%mutate(formule=(paste(value,form, sep = "~")))
+
+datasummary_skim(data_lag%>%select(starts_with("FA")&!ends_with("lag")), output = "tinytable", fun_numeric = list( Mean = Mean, SD = SD, Min = Min, Median = Median, Max = Max, Histogram = function(x) ""))
+
+# datasummary_correlation(data_lag%>%select(starts_with("FA")&!ends_with("lag")))
+
+# labels<-labels%>%
+#   mutate(x=str_replace_all(x,c(" "="_","-"="_")),
+#     labels_lag=paste0(x, "_lag"))
+# 
+# form<-paste(labels$labels_lag, collapse = "+")
+# 
+# for (i in labels$x) {
+#   
+#   assign(paste0("form_", i),paste(i, form, sep = "~"))
+#   
+# }
+
+
+
+```
+
+
+### Les modèles sur l'ensemble des commentaires
+
+```{r}
+
+# data_lag2<-data_lag%>%filter(!if_any(everything(), is.na))
+# 
+# for (i in 1:nrow(variable)) {
+# 
+#   assign(paste0("lm_", variable$value[i]),lm(variable$formule[i], data_lag, na.action =na.omit ))
+# }
+# 
+# # lm_FA_degout<-lm(variable$formule[1], data_lag2, na.action =na.omit)
+# # lm_FA_surprise<-lm(variable$formule[2], data_lag2, na.action =na.omit )
+# # lm_FA_positif<-lm(variable$formule[3], data_lag2, na.action =na.omit)
+# # lm_FA_inattendu<-lm(variable$formule[4], data_lag2, na.action =na.omit)
+# # lm_FA_provocation<-lm(variable$formule[5], data_lag2, na.action =na.omit)
+# # lm_FA_incongru<-lm(variable$formule[6], data_lag2, na.action =na.omit)
+# # lm_FA_inclusion<-lm(variable$formule[7], data_lag2, na.action =na.omit)
+# # lm_FA_militantisme<-lm(variable$formule[8], data_lag2, na.action =na.omit)
+# # lm_FA_exclusion<-lm(variable$formule[9], data_lag2, na.action =na.omit)
+# 
+# 
+# models<-list("dégoût" = lm_FA_degout, "surprise"= lm_FA_surprise, "positif"= lm_FA_positif, "inattendu" = lm_FA_inattendu, "incongru" = lm_FA_incongru, "provocation"= lm_FA_provocation, "inclusion"= lm_FA_inclusion, "exclusion"=lm_FA_exclusion, "militantisme"=lm_FA_militantisme)
+# 
+# 
+# write_rds(models, "model_lm_comp.rds")
+
+models<-read_rds("model_lm_comp.rds")
+
+modelsummary(models,stars = T,
+  statistic = NULL,
+  coef_omit = "Intercept",
+  title="Résultats des modèles de régression linéaire")
+
+
+
+modelplot(models,size = 1,  linetype = 'dotted',coef_omit = 'Interc') +
+  aes(alpha = if_else(p.value < 0.05, 1, 0))+
+  geom_vline(xintercept = 0, color = 'grey')+
+  labs(x = 'Coefficients', 
+         y = 'Variables',
+         title = 'Résultats des modèles de régression linéaire',
+       caption = "La transparence représente la significativité des paramètres")+
+    scale_color_manual(values = wes_palette('Zissou1Continuous'))+
+  guides(alpha="none")
+
+
+# wesanderson::wes_palettes
+# 
+# export_summs(lm_FA_incongru,lm_FA_provocation, lm_FA_tabou, lm_FA_degout, lm_FA_surprise, lm_FA_positif, lm_FA_inclusion, lm_FA_militantisme, lm_FA_exclusion, model.names = variable$value, scale = T, robust=T)
+# plot_summs(lm_FA_incongru,lm_FA_provocation, lm_FA_tabou, lm_FA_degout, lm_FA_surprise, lm_FA_positif, lm_FA_inclusion, lm_FA_militantisme, lm_FA_exclusion, model.names = variable$value, scale = T, robust=T, colors = RColorBrewer::brewer.pal(9,"Paired"))+
+#   labs(title = "Résultats des modèles de régression")
+
+
+```
+
+### Les modèles sur les réactions
+
+```{r}
+# reaction2<-reaction%>%filter(!if_any(everything(), is.na))
+# 
+# for (i in 1:nrow(variable)) {
+# 
+#   assign(paste0("lm_", variable$value[i]),lm(variable$formule[i], reaction))
+# }
+# 
+# # lm_FA_degout<-lm(variable$formule[1], reaction)
+# # lm_FA_surprise<-lm(variable$formule[2], reaction)
+# # lm_FA_positif<-lm(variable$formule[3], reaction)
+# # lm_FA_inattendu<-lm(variable$formule[4], reaction)
+# # lm_FA_provocation<-lm(variable$formule[5], reaction)
+# # lm_FA_incongru<-lm(variable$formule[6], reaction)
+# # lm_FA_inclusion<-lm(variable$formule[7], reaction)
+# # lm_FA_militantisme<-lm(variable$formule[8], reaction)
+# # lm_FA_exclusion<-lm(variable$formule[9], reaction)
+# 
+# models<-list("dégoût" = lm_FA_degout, "surprise"= lm_FA_surprise, "positif"= lm_FA_positif, "inattendu" = lm_FA_inattendu, "incongru" = lm_FA_incongru, "provocation"= lm_FA_provocation, "inclusion"= lm_FA_inclusion, "exclusion"=lm_FA_exclusion, "militantisme"=lm_FA_militantisme)
+# 
+# write_rds(models, "model_lm_reac.rds")
+
+models<-read_rds("model_lm_reac.rds")
+
+modelsummary(models,stars = T,
+  statistic = NULL,
+  coef_omit = "Intercept",
+  title="Résultats des modèles de régression linéaire")
+
+
+
+modelplot(models,size = 1,  linetype = 'dotted',coef_omit = 'Interc') +
+  aes(alpha = if_else(p.value < 0.05, 1, 0))+
+  geom_vline(xintercept = 0, color = 'grey')+
+  labs(x = 'Coefficients', 
+         y = 'Variables',
+         title = 'Résultats des modèles de régression linéaire',
+       caption = "La transparence représente la significativité des paramètres")+
+    scale_color_manual(values = wes_palette('Zissou1Continuous'), name="Modèles")+
+  guides(alpha="none")
+
+
+
+```
+
+### L'engagement
+
+```{r}
+
+# formule<-paste0("LikeCount~", paste(variable$value, collapse = "+"))
+# 
+# 
+# lm_like<-list("Nb_Like"=glm(formule, data_lag, family = poisson))
+# 
+# write_rds(models, "model_lm_like.rds")
+
+lm_like<-read_rds("model_lm_like.rds")
+
+modelsummary(lm_like,stars = T,
+  statistic = NULL,
+  coef_omit = "Intercept",
+  title="Résultats du modèle de régression Poisson")
+
+
+
+modelplot(lm_like,size = 1, color="orange", linetype = 'dotted',coef_omit = 'Interc') +
+  aes(alpha = if_else(p.value < 0.05, 1, 0))+
+  geom_vline(xintercept = 0, color = 'grey')+
+  labs(x = 'Coefficients', 
+         y = 'Variables',
+         title = 'Résultats du modèle de régression de Poisson\nsur l\'engagement (nombre de likes)',
+       caption = "La transparence représente la significativité des paramètres")+
+  guides(alpha="none")
+
+
+
+# export_summs(lm_like, scale = T, robust=T)
+# plot_summs(lm_like, scale = T, robust=T, colors = RColorBrewer::brewer.pal(9,"Paired"))+
+#   labs(title = "Résultats du modèle de régression sur l'engagement")
+```
+
+
+
+## Tests des hypothèses {#sec-hyp}
+
+J'ai testé les différentes hypothèses présentes dans le fichier excel du drive, à l'exception des hypothèses portant sur l'intentité émotionnelle, car je n'ai pas encore trouvé comment créer cet indicateur. Les modèles sont testés sur les données de réaction (discussion, réponses aux commentaires).
+
+*   Les commentaires positifs permettent-ils d'arrêter ou de diminuer les commentaires négatifs ?
+
+```{r}
+
+mod<-list("Négatif"=glm(négatif~positif_lag, reaction, family=quasibinomial(link="probit")))
+
+modelsummary(mod,stars = T,
+  statistic = NULL,
+  coef_omit = "Intercept",
+  title="Régression quasi-binomiale, lien probit")
+          
+```
+
+Hypothèse validée.
+
+
+*   L'adhésion permet elle de dimunuer le rejet ?
+
+```{r}
+
+mod<-list("Rejet"=glm(rejet~adhésion_lag, reaction, family=quasibinomial(link="probit")))
+
+modelsummary(mod,stars = T,
+  statistic = NULL,
+  coef_omit = "Intercept",
+  title="Régression quasi-binomiale, lien probit")
+          
+```
+
+Hypothèse validée.
+
+
+*   La communauté va amoindrir le rejet en prenant part au débat
+
+```{r}
+
+mod<-list("Rejet"=glm(rejet~adhésion_lag+inclusion_lag+militantisme_lag+défense_lag+positif_lag, reaction, family=quasibinomial(link="probit")),
+          "Dégoût"=glm(dégoût~adhésion_lag+inclusion_lag+militantisme_lag+défense_lag+positif_lag, reaction, family=quasibinomial(link="probit")),
+          "Exclusion"=glm(exclusion~adhésion_lag+inclusion_lag+militantisme_lag+défense_lag+positif_lag, reaction, family=quasibinomial(link="probit")),
+          "Provocation"=glm(provocation~adhésion_lag+inclusion_lag+militantisme_lag+défense_lag+positif_lag, reaction, family=quasibinomial(link="probit")),
+          "Polémique"=glm(polémique~adhésion_lag+inclusion_lag+militantisme_lag+défense_lag+positif_lag, reaction, family=quasibinomial(link="probit")))
+
+modelsummary(mod,stars = T,
+  statistic = NULL,
+  coef_omit = "Intercept",
+  title="Régression quasi-binomiale, lien probit")
+
+
+```
+
+Le positif permet d'atténuer les commentaires de rejet et de dégoût. Je ne pense pas qu'on puisse valider l'hypothèse.
+
+
+*   Les commentaires négatifs amènent-ils une prise de parole forte de la communauté active pour défendre la marque ?
+
+```{r}
+
+mod<-list("Adhésion"=glm(adhésion~négatif_lag+dégoût_lag+rejet_lag, reaction, family=quasibinomial(link="probit")),
+          "Militantisme"=glm(militantisme~négatif_lag+dégoût_lag+rejet_lag, reaction, family=quasibinomial(link="probit")),
+          "Féminisme"=glm(féminisme~négatif_lag+dégoût_lag+rejet_lag, reaction, family=quasibinomial(link="probit")))
+
+modelsummary(mod,stars = T,
+  statistic = NULL,
+  coef_omit = "Intercept",
+  title="Régression quasi-binomiale, lien probit")
+
+
+```
+
+Les commentaires négatifs entraînent une plus grande réaction de commentaires féministes.
+
+
+*   La discussion est-elle plus longue lorsque les commentaires sont positifs ?
+
+```{r}
+
+mod<-list("Rang"=glm(rang~positif_lag*négatif_lag, reaction, family=poisson(link="log")),
+          "Rang"=glm(rang~positif_lag+négatif_lag, reaction, family=poisson(link="log")),
+          "Rang"=glm(rang~positif_lag, reaction, family=poisson(link="log")),
+          "Rang"=glm(rang~négatif_lag, reaction, family=poisson(link="log")))
+
+modelsummary(mod,stars = T,
+  statistic = NULL,
+  coef_omit = "Intercept",
+  title="Régression logistique")
+
+```
+
+Les commentaires négatifs entraînent des discussions plus courtes que les positifs, qui semblent dans une certaine mesure conduire à des discussions plus longues. Mais ce qui alimente surtout le débat, c'est la présence combinée de positif et négatif (effet d'interaction).
+
+
+*   La contagion émotionnelle est elle plus forte lorsque les commentaires sont positifs ?
+
+```{r}
+
+pos<-reaction%>%filter(rang==1&positif>0.9)%>%select(ParentID)
+
+neg<-reaction%>%filter(rang==1&négatif>0.9)%>%select(ParentID)
+
+pos<-reaction%>%group_by(ParentID)%>%filter(ParentID%in%pos$ParentID)%>%summarise(max=max(rang))%>%mutate(group="pos")
+
+neg<-reaction%>%group_by(ParentID)%>%filter(ParentID%in%neg$ParentID)%>%summarise(max=max(rang))%>%mutate(group="neg")
+
+test<-rbind(pos, neg)
+# levene_test(test,max~group)
+
+stat.test <- t_test(test, max~group, var.equal = T)%>%add_significance()
+
+bxp <- ggboxplot(
+  test, x = "group", y = "max", 
+  ylab = "Longueur de conversation", xlab = "Groupes")
+
+# Add p-value and significance levels
+stat.test <- stat.test %>% add_xy_position(x = "group")
+bxp + 
+  stat_pvalue_manual(stat.test, tip.length = 0) +
+  labs(subtitle = get_test_label(stat.test, detailed = TRUE))
+
+
+adh<-reaction%>%filter(rang==1&adhésion>0.75)%>%select(ParentID)
+
+rej<-reaction%>%filter(rang==1&rejet>0.75)%>%select(ParentID)
+
+adh<-reaction%>%group_by(ParentID)%>%filter(ParentID%in%adh$ParentID)%>%summarise(max=max(rang))%>%mutate(group="adhésion")
+
+rej<-reaction%>%group_by(ParentID)%>%filter(ParentID%in%rej$ParentID)%>%summarise(max=max(rang))%>%mutate(group="rejet")
+
+test<-rbind(adh, rej)
+
+# levene_test(test,max~group)
+
+stat.test <- t_test(test, max~group, var.equal = T)%>%add_significance()
+
+bxp <- ggboxplot(
+  test, x = "group", y = "max", 
+  ylab = "Longueur de conversation", xlab = "Groupes")
+
+# Add p-value and significance levels
+stat.test <- stat.test %>% add_xy_position(x = "group")
+bxp + 
+  stat_pvalue_manual(stat.test, tip.length = 0) +
+  labs(subtitle = get_test_label(stat.test, detailed = TRUE))
+
+```
+Hypothèse refusée, il n'y a pas de différence.
+
+*   Commentaire + positif s'il arrive en fin de conversation ?
+
+```{r}
+
+pos<-reaction%>%group_by(ParentID)%>%filter(rang>max(rang)-5&positif>0.9)%>%count()%>%mutate(group="pos")%>%ungroup()
+neg<-reaction%>%group_by(ParentID)%>%filter(rang>max(rang)-5&négatif>0.9)%>%count()%>%mutate(group="neg")%>%ungroup()
+
+test<-rbind(pos, neg)
+
+# levene_test(test,n~group)
+
+stat.test <- t_test(test, n~group) %>%
+  add_significance()
+
+bxp <- ggboxplot(
+  test, x = "group", y = "n", 
+  ylab = "Nombre de commentaires en fin de conversation", xlab = "Groupes")
+
+# Add p-value and significance levels
+stat.test <- stat.test %>% add_xy_position(x = "group")
+bxp + 
+  stat_pvalue_manual(stat.test, tip.length = 0) +
+  labs(title = get_test_label(stat.test, detailed = TRUE), subtitle=paste("\nmoyenne pos =", round(mean(pos$n),2), "\nmoyenne neg =", round(mean(neg$n),2)))
+```
+
+```{r}
+
+reaction%>%filter(positif>0.9)%>%mutate(conv=if_else(rang>4, "fin", "début"))%>%summarise(n=n(), .by=conv)%>%mutate(prop=round(n/sum(n),2))%>%
+  ggplot(aes(x=conv, y=prop, fill = conv))+
+  geom_col(show.legend = F)+
+  scale_y_continuous(labels = scales::label_percent())+
+  scale_fill_manual(values = wes_palette('Darjeeling2'))+
+  theme_light()+
+  labs(title = "% de messages positif en début et fin de conversation",
+       x=NULL, y=NULL)
+
+
+
+
+```
+
+
+Hypothèse refusée, c'est le contraire.
+
+*   Un message factuel implique moins de réactions qu'un message émotionnel ?
+
+```{r}
+
+type<-reaction%>%filter(rang==1)%>%mutate(type=if_else(neutre>0.5, "factuel", "émotionnel"))%>%select(ParentID, type)
+
+test<-reaction%>%group_by(ParentID)%>%summarise(max=max(rang))%>%inner_join(type)
+  
+# levene_test(test,max~type)
+
+stat.test <- t_test(test, max~type, var.equal = T) %>%
+  add_significance()
+
+bxp <- ggboxplot(
+  test, x = "type", y = "max", 
+  ylab = "Longueur de conversation", xlab = "Groupes",outlier.shape = NA)
+
+# Add p-value and significance levels
+stat.test <- stat.test %>% add_xy_position(x = "group")%>%replace_na(list(xmin=1, xmax=2))
+bxp + 
+  stat_pvalue_manual(stat.test, tip.length = 0) +
+  labs(subtitle = get_test_label(stat.test, detailed = TRUE))
+
+```
+Hypothèse rejetée. On a utilisé la variable "neutre" pour déterminer si le commentaire est émotionnel ou factuel.
